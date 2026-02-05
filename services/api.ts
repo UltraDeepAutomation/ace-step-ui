@@ -266,6 +266,7 @@ export interface GenerationJob {
   status: 'pending' | 'queued' | 'running' | 'succeeded' | 'failed';
   queuePosition?: number;
   etaSeconds?: number;
+  progress?: number; // 0-100 estimated progress
   result?: {
     audioUrls: string[];
     bpm?: number;
@@ -323,6 +324,18 @@ export const generateApi = {
     status_message?: string;
     error?: string;
   }> => api('/api/generate/format', { method: 'POST', body: params, token }),
+
+  // Cancel a specific job
+  cancelJob: (taskId: string, token: string): Promise<{ success: boolean; message: string }> =>
+    api(`/api/generate/cancel/${taskId}`, { method: 'POST', token }),
+
+  // Clear all pending/running jobs
+  clearAll: (token: string): Promise<{ cleared: number }> =>
+    api('/api/generate/clear-all', { method: 'POST', token }),
+
+  // Get all active jobs (for recovering state)
+  getActive: (token: string): Promise<{ jobs: Array<{ jobId: string; status: string; queuePosition?: number; progress: number }> }> =>
+    api('/api/generate/active', { token }),
 };
 
 // Users API

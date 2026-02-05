@@ -15,6 +15,9 @@ import {
   getJobRawResponse,
   downloadAudioToBuffer,
   resolvePythonPath,
+  cancelJob,
+  clearAllJobs,
+  getActiveJobs,
 } from '../services/acestep.js';
 import { getStorageProvider } from '../services/storage/factory.js';
 
@@ -551,6 +554,58 @@ router.get('/debug/:taskId', authMiddleware, async (req: AuthenticatedRequest, r
     res.json({ rawResponse });
   } catch (error) {
     res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// Cancel a specific generation job
+router.post('/cancel/:taskId', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { taskId } = req.params;
+
+    // First try to cancel in ACE-Step service
+    const result = cancelJob(taskId);
+
+    // Also update database if we have a job ID
+    await pool.query(
+      `UPDATE generation_jobs SET status = 'failed', error = 'Cancelled by user', updated_at = datetime('now') 
+       WHERE acestep_task_id = ? AND user_id = ?`,
+      [taskId, req.user!.id]
+    );
+
+    res.json(result);
+  } catch (error) {
+    console.error('Cancel job error:', error);
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
+
+// Clear all pending/running jobs (for page refresh scenarios)
+router.post('/clear-all', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const result = clearAllJobs();
+
+    // Also update database
+    await pool.query(
+      `UPDATE generation_jobs SET status = 'failed', error = 'Cancelled - queue cleared', updated_at = datetime('now') 
+       WHERE user_id = ? AND status IN ('pending', 'queued', 'running')`,
+      [req.user!.id]
+    );
+
+    res.json(result);
+  } catch (error) {
+    console.error('Clear all jobs error:', error);
+    res.status(500).json({ cleared: 0, error: (error as Error).message });
+  }
+});
+
+// Get all active jobs (for recovering state after page refresh)
+router.get('/active', authMiddleware, async (_req: AuthenticatedRequest, res: Response) => {
+  try {
+    const jobs = getActiveJobs();
+    res.json({ jobs });
+  } catch (error) {
+    console.error('Get active jobs error:', error);
+    res.status(500).json({ jobs: [], error: (error as Error).message });
   }
 });
 

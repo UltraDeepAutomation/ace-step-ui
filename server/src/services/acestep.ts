@@ -382,6 +382,7 @@ interface JobStatus {
   status: 'queued' | 'running' | 'succeeded' | 'failed';
   queuePosition?: number;
   etaSeconds?: number;
+  progress?: number; // 0-100 estimated progress
   result?: GenerationResult;
   error?: string;
 }
@@ -485,6 +486,7 @@ async function processGeneration(
   job: ActiveJob
 ): Promise<void> {
   job.status = 'running';
+  job.startTime = Date.now(); // Reset startTime when generation actually starts
 
   const caption = params.style || 'pop music';
   const prompt = params.customMode ? caption : (params.songDescription || caption);
@@ -823,18 +825,24 @@ export async function getJobStatus(jobId: string): Promise<JobStatus> {
 
   const elapsed = Math.floor((Date.now() - job.startTime) / 1000);
 
+  // Estimate progress based on elapsed time (typical generation ~60s without LLM)
+  const estimatedDuration = 60; // 1 minute typical without LLM
+  const progress = Math.min(95, Math.round((elapsed / estimatedDuration) * 100));
+
   // Include queue position if queued
   if (job.status === 'queued') {
     return {
       status: job.status,
       queuePosition: job.queuePosition,
-      etaSeconds: (job.queuePosition || 1) * 180, // ~3 min per job estimate
+      etaSeconds: (job.queuePosition || 1) * 180,
+      progress: 0,
     };
   }
 
   return {
     status: job.status,
-    etaSeconds: Math.max(0, 180 - elapsed), // 3 min estimate
+    etaSeconds: Math.max(0, 60 - elapsed),
+    progress,
   };
 }
 
@@ -919,4 +927,74 @@ export function cleanupOldJobs(maxAgeMs: number = 3600000): void {
       activeJobs.delete(jobId);
     }
   }
+}
+
+// Cancel a specific job
+export function cancelJob(jobId: string): { success: boolean; message: string } {
+  const job = activeJobs.get(jobId);
+
+  if (!job) {
+    return { success: false, message: 'Job not found' };
+  }
+
+  // Remove from queue if queued
+  const queueIndex = jobQueue.indexOf(jobId);
+  if (queueIndex > -1) {
+    jobQueue.splice(queueIndex, 1);
+  }
+
+  // Update remaining queue positions
+  jobQueue.forEach((id, index) => {
+    const queuedJob = activeJobs.get(id);
+    if (queuedJob) {
+      queuedJob.queuePosition = index + 1;
+    }
+  });
+
+  // Mark as cancelled and remove
+  job.status = 'failed';
+  job.error = 'Cancelled by user';
+  activeJobs.delete(jobId);
+
+  console.log(`Job ${jobId}: Cancelled by user`);
+  return { success: true, message: 'Job cancelled' };
+}
+
+// Clear all jobs (for page refresh scenarios)
+export function clearAllJobs(): { cleared: number } {
+  const count = activeJobs.size + jobQueue.length;
+
+  // Clear the queue
+  jobQueue.length = 0;
+
+  // Clear all active jobs
+  activeJobs.clear();
+
+  // Reset processing flag
+  isProcessingQueue = false;
+
+  console.log(`Cleared ${count} jobs from queue`);
+  return { cleared: count };
+}
+
+// Get all active jobs (for recovering state after refresh)
+export function getActiveJobs(): Array<{ jobId: string; status: string; queuePosition?: number; progress: number }> {
+  const jobs: Array<{ jobId: string; status: string; queuePosition?: number; progress: number }> = [];
+
+  for (const [jobId, job] of activeJobs) {
+    const elapsed = Math.floor((Date.now() - job.startTime) / 1000);
+    const estimatedDuration = 60;
+    const progress = job.status === 'running'
+      ? Math.min(95, Math.round((elapsed / estimatedDuration) * 100))
+      : 0;
+
+    jobs.push({
+      jobId,
+      status: job.status,
+      queuePosition: job.queuePosition,
+      progress,
+    });
+  }
+
+  return jobs;
 }

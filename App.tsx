@@ -95,7 +95,7 @@ export default function App() {
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pendingSeekRef = useRef<number | null>(null);
-  const playNextRef = useRef<() => void>(() => {});
+  const playNextRef = useRef<() => void>(() => { });
 
   // Mobile Details Modal State
   const [showMobileDetails, setShowMobileDetails] = useState(false);
@@ -481,15 +481,16 @@ export default function App() {
   }, [volume]);
 
   // Helper to cleanup a job and check if all jobs are done
-  const cleanupJob = useCallback((jobId: string, tempId: string) => {
+  const cleanupJob = useCallback((jobId: string, tempIdOrIds: string | string[]) => {
     const jobData = activeJobsRef.current.get(jobId);
     if (jobData) {
       clearInterval(jobData.pollInterval);
       activeJobsRef.current.delete(jobId);
     }
 
-    // Remove temp song
-    setSongs(prev => prev.filter(s => s.id !== tempId));
+    // Remove temp song(s)
+    const idsToRemove = Array.isArray(tempIdOrIds) ? tempIdOrIds : [tempIdOrIds];
+    setSongs(prev => prev.filter(s => !idsToRemove.includes(s.id)));
 
     // Update active job count
     setActiveJobCount(activeJobsRef.current.size);
@@ -499,6 +500,32 @@ export default function App() {
       setIsGenerating(false);
     }
   }, []);
+
+  // Cancel a generation in progress
+  const handleCancelGeneration = useCallback(async (song: Song) => {
+    if (!token) return;
+
+    // Find which job this song belongs to
+    for (const [jobId, jobData] of activeJobsRef.current) {
+      const tempIds = jobData.tempIds || [jobData.tempId];
+      if (tempIds.includes(song.id)) {
+        try {
+          // Call backend to cancel
+          await generateApi.cancelJob(jobId, token);
+          showToast('Generation cancelled', 'info');
+        } catch (e) {
+          console.error('Failed to cancel job:', e);
+        }
+        // Cleanup locally regardless of backend success
+        cleanupJob(jobId, tempIds);
+        return;
+      }
+    }
+
+    // If not found in active jobs, just remove the temp song
+    setSongs(prev => prev.filter(s => s.id !== song.id));
+    showToast('Generation cancelled', 'info');
+  }, [token, cleanupJob, showToast]);
 
   // Refresh songs list (called when any job completes successfully)
   const refreshSongsList = useCallback(async () => {
@@ -550,23 +577,30 @@ export default function App() {
     setCurrentView('create');
     setMobileShowList(false);
 
-    // Create unique temp ID for this job
-    const tempId = `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const tempSong: Song = {
-      id: tempId,
-      title: params.title || 'Generating...',
-      lyrics: '',
-      style: params.style,
-      coverUrl: 'https://picsum.photos/200/200?blur=10',
-      duration: '--:--',
-      createdAt: new Date(),
-      isGenerating: true,
-      tags: params.customMode ? ['custom'] : ['simple'],
-      isPublic: true
-    };
+    // Create temp songs for each variation
+    const batchCount = params.batchSize || 2;
+    const tempIds: string[] = [];
+    const tempSongs: Song[] = [];
 
-    setSongs(prev => [tempSong, ...prev]);
-    setSelectedSong(tempSong);
+    for (let i = 0; i < batchCount; i++) {
+      const tempId = `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}_v${i + 1}`;
+      tempIds.push(tempId);
+      tempSongs.push({
+        id: tempId,
+        title: params.title ? `${params.title} (v${i + 1})` : `Generating... (v${i + 1})`,
+        lyrics: '',
+        style: params.style,
+        coverUrl: 'https://picsum.photos/200/200?blur=10',
+        duration: '--:--',
+        createdAt: new Date(),
+        isGenerating: true,
+        tags: params.customMode ? ['custom'] : ['simple'],
+        isPublic: true
+      });
+    }
+
+    setSongs(prev => [...tempSongs, ...prev]);
+    setSelectedSong(tempSongs[0]);
     setShowRightSidebar(true);
 
     try {
@@ -628,51 +662,52 @@ export default function App() {
         try {
           const status = await generateApi.getStatus(job.jobId, token);
 
-          // Update queue position on the temp song
+          // Update queue position and progress on ALL temp songs
           setSongs(prev => prev.map(s => {
-            if (s.id === tempId) {
+            if (tempIds.includes(s.id)) {
               return {
                 ...s,
                 queuePosition: status.status === 'queued' ? status.queuePosition : undefined,
+                generationProgress: status.progress ?? 0,
               };
             }
             return s;
           }));
 
           if (status.status === 'succeeded' && status.result) {
-            cleanupJob(job.jobId, tempId);
+            cleanupJob(job.jobId, tempIds);
             await refreshSongsList();
 
             if (window.innerWidth < 768) {
               setMobileShowList(true);
             }
           } else if (status.status === 'failed') {
-            cleanupJob(job.jobId, tempId);
+            cleanupJob(job.jobId, tempIds);
             console.error(`Job ${job.jobId} failed:`, status.error);
             showToast(`Generation failed: ${status.error || 'Unknown error'}`, 'error');
           }
         } catch (pollError) {
           console.error(`Polling error for job ${job.jobId}:`, pollError);
-          cleanupJob(job.jobId, tempId);
+          cleanupJob(job.jobId, tempIds);
         }
       }, 2000);
 
-      // Track this job
-      activeJobsRef.current.set(job.jobId, { tempId, pollInterval });
+      // Track this job (store first tempId for compatibility)
+      activeJobsRef.current.set(job.jobId, { tempId: tempIds[0], tempIds, pollInterval });
       setActiveJobCount(activeJobsRef.current.size);
 
       // Timeout after 10 minutes
       setTimeout(() => {
         if (activeJobsRef.current.has(job.jobId)) {
           console.warn(`Job ${job.jobId} timed out`);
-          cleanupJob(job.jobId, tempId);
+          cleanupJob(job.jobId, tempIds);
           showToast('Generation timed out', 'error');
         }
       }, 600000);
 
     } catch (e) {
       console.error('Generation error:', e);
-      setSongs(prev => prev.filter(s => s.id !== tempId));
+      setSongs(prev => prev.filter(s => !tempIds.includes(s.id)));
 
       // Only set isGenerating to false if no other jobs are running
       if (activeJobsRef.current.size === 0) {
@@ -691,8 +726,8 @@ export default function App() {
     const nextQueue = list && list.length > 0
       ? list
       : (playQueue.length > 0 && playQueue.some(s => s.id === song.id))
-          ? playQueue
-          : (songs.some(s => s.id === song.id) ? songs : [song]);
+        ? playQueue
+        : (songs.some(s => s.id === song.id) ? songs : [song]);
     const nextIndex = nextQueue.findIndex(s => s.id === song.id);
     setPlayQueue(nextQueue);
     setQueueIndex(nextIndex);
@@ -993,6 +1028,7 @@ export default function App() {
                 onNavigateToProfile={handleNavigateToProfile}
                 onReusePrompt={handleReuse}
                 onDelete={handleDeleteSong}
+                onCancelGeneration={handleCancelGeneration}
               />
             </div>
 

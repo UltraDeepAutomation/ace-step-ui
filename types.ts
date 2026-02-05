@@ -7,6 +7,7 @@ export interface Song {
   duration: string;
   createdAt: Date;
   isGenerating?: boolean;
+  generationProgress?: number; // 0-100 progress during generation
   queuePosition?: number; // Position in queue (undefined = actively generating, number = waiting in queue)
   tags: string[];
   audioUrl?: string;
